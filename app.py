@@ -12,6 +12,22 @@ from flask import Flask, jsonify, render_template, request
 
 from fuel_fetcher import fetch_all_fuel_prices
 from logistics_calculators import calculate_truck_requirement, calculate_warehouse_space
+from logistics_chargeable import calculate_chargeable_weight
+from logistics_desk_tools import (
+    calculate_fifo_fefo,
+    calculate_free_time,
+    calculate_inventory_doh,
+    calculate_landed_cost,
+    calculate_multi_stop,
+    calculate_pallet_build,
+    calculate_receiving_capacity,
+    calculate_transit_eta,
+    calculate_trip_cost,
+    check_dg_segregation,
+    generate_doc_checklist,
+)
+from logistics_fuel_surcharge import calculate_fuel_surcharge
+from logistics_quote import calculate_freight_quote
 from oanda_fetcher import CURRENCIES, fetch_all_rates
 
 logging.basicConfig(level=logging.INFO)
@@ -205,6 +221,117 @@ def api_warehouse():
     except Exception as exc:
         logger.exception("Warehouse calculation failed")
         return jsonify({"error": str(exc)}), 500
+
+
+def _desk_post(handler):
+    try:
+        return jsonify(handler(request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("Desk tool failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/quote", methods=["POST"])
+def api_quote():
+    return _desk_post(calculate_freight_quote)
+
+
+@app.route("/api/chargeable-weight", methods=["POST"])
+def api_chargeable():
+    return _desk_post(calculate_chargeable_weight)
+
+
+@app.route("/api/fuel-surcharge")
+def api_fuel_surcharge():
+    baseline = float(request.args.get("baseline", 3.5))
+    current_param = request.args.get("current")
+    currency = "AED"
+    if current_param is not None:
+        current = float(current_param)
+        currency = request.args.get("currency", "LOCAL")
+    else:
+        snap = _fuel_snapshot()
+        uae = snap.get("uae") or {}
+        currency = uae.get("currency", "AED")
+        grades = uae.get("grades") or []
+        diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
+        if not diesel:
+            return jsonify({"error": "Diesel price unavailable"}), 503
+        current = float(diesel["price"])
+    try:
+        return jsonify(calculate_fuel_surcharge(baseline, current, currency=currency))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/receiving", methods=["POST"])
+def api_receiving():
+    return _desk_post(calculate_receiving_capacity)
+
+
+@app.route("/api/inventory-doh", methods=["POST"])
+def api_inventory_doh():
+    return _desk_post(calculate_inventory_doh)
+
+
+@app.route("/api/pallet-build", methods=["POST"])
+def api_pallet_build():
+    return _desk_post(calculate_pallet_build)
+
+
+@app.route("/api/fifo-fefo", methods=["POST"])
+def api_fifo_fefo():
+    return _desk_post(calculate_fifo_fefo)
+
+
+@app.route("/api/landed-cost", methods=["POST"])
+def api_landed_cost():
+    body = request.get_json(silent=True) or {}
+    fx = float(body.get("fx_rate") or 0)
+    if fx <= 0:
+        data = _snapshot()
+        rates = data.get("rates") or {}
+        from_ccy = str(body.get("from_currency") or "USD").upper()
+        to_ccy = str(body.get("to_currency") or "AED").upper()
+        if from_ccy not in rates or to_ccy not in rates:
+            return jsonify({"error": "Rates not loaded"}), 503
+        fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
+    try:
+        return jsonify(calculate_landed_cost(body, fx))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/doc-checklist", methods=["POST"])
+def api_doc_checklist():
+    return _desk_post(generate_doc_checklist)
+
+
+@app.route("/api/dg-segregation", methods=["POST"])
+def api_dg_segregation():
+    return _desk_post(check_dg_segregation)
+
+
+@app.route("/api/trip-cost", methods=["POST"])
+def api_trip_cost():
+    return _desk_post(calculate_trip_cost)
+
+
+@app.route("/api/transit-eta", methods=["POST"])
+def api_transit_eta():
+    return _desk_post(calculate_transit_eta)
+
+
+@app.route("/api/free-time", methods=["POST"])
+def api_free_time():
+    return _desk_post(calculate_free_time)
+
+
+@app.route("/api/multi-stop", methods=["POST"])
+def api_multi_stop():
+    return _desk_post(calculate_multi_stop)
 
 
 def _open_browser() -> None:

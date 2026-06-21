@@ -1,0 +1,16 @@
+# Built desktop app (PyInstaller output)
+LogisticsToolkit/
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

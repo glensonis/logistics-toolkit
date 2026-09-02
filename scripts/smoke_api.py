@@ -12,6 +12,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from datetime import date, timedelta
@@ -339,6 +340,12 @@ def _run_one(client, case: dict) -> tuple[str, bool]:
 
 
 def main() -> int:
+    logging.getLogger().setLevel(logging.WARNING)
+    logging.getLogger("app").setLevel(logging.WARNING)
+    logging.getLogger("fuel_fetcher").setLevel(logging.WARNING)
+    logging.getLogger("oanda_fetcher").setLevel(logging.WARNING)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
     _out("=" * 60)
     _out("Logistics Toolkit API smoke tests")
     _out("Flask test client (no bind). Prefer 127.0.0.1 for live HTTP.")

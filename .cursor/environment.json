@@ -1,0 +1,11 @@
+{
+  "name": "Logistics Toolkit",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "webpage",
+      "command": "python3 app.py"
+    }
+  ]
+}

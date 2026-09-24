@@ -13,6 +13,22 @@ python app.py
 
 Open [http://127.0.0.1:5000](http://127.0.0.1:5000). Dependencies are `flask` and `requests` (`requirements.txt`).
 
+## Share on your home network
+
+By default the app only answers on the same PC (`127.0.0.1`). To open it from phones, tablets, or other computers on your home Wi-Fi:
+
+```bash
+python app.py --lan
+```
+
+Desktop app: double-click `Run Logistics Toolkit (LAN).bat` instead of `Run Logistics Toolkit.bat`. Setting `LOGISTICS_LAN=1` does the same.
+
+Then on the other device open `http://<this-PC-IP>:5000`. When run from source, the startup banner prints the exact address. On Windows you can also find the IPv4 address with `ipconfig`.
+
+- The first time, Windows Firewall asks whether to allow access. Tick **Private networks** and click **Allow**. Your home Wi-Fi must be set to the *Private* network profile.
+- Both devices must be on the same network (guest Wi-Fi usually isolates devices).
+- There is no login. Keep this on your home network and do not port-forward port 5000 on your router.
+
 ## Smoke tests
 
 `scripts/smoke_api.py` is the test suite. There is no pytest.
@@ -35,7 +51,7 @@ The script builds `--onedir --noupx --noconsole` (not `--onefile`, and not UPX) 
 
 ## Notes
 
-- Port is **5000** on **127.0.0.1**.
+- Port is **5000** on **127.0.0.1** (all interfaces with `--lan`).
 - Keep the webpage and desktop app in parity when changing shared logic.
 - Do not reformat `templates/index.html`: `patch_desktop_ui.py` matches exact source text to patch the desktop UI.
 - Contributor / agent notes (architecture, desktop AV caveats, CLI policy) live in `CLAUDE.md`.

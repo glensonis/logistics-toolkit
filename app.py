@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 REFRESH_INTERVAL_SECONDS = 5 * 60
 FUEL_REFRESH_INTERVAL_SECONDS = 60 * 60
 HOST = "127.0.0.1"
+LAN_HOST = "0.0.0.0"
 PORT = 5000
 
 
@@ -343,12 +345,35 @@ def _is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
+def _lan_mode() -> bool:
+    return "--lan" in sys.argv[1:] or os.environ.get("LOGISTICS_LAN") == "1"
+
+
+def _lan_ip() -> str | None:
+    # UDP connect() only selects the outbound interface; no packet is sent.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
 def main() -> None:
+    lan = _lan_mode()
+    bind_host = LAN_HOST if lan else HOST
     if not _is_frozen():
         print("=" * 52)
         print("  Logistics Toolkit (FX, Fuel, Truck, Warehouse)")
         print("=" * 52)
         print(f"  Starting server at http://{HOST}:{PORT}")
+        if lan:
+            ip = _lan_ip()
+            if ip:
+                print(f"  LAN sharing ON - other devices open http://{ip}:{PORT}")
+            else:
+                print(f"  LAN sharing ON - open http://<this-PC-IP>:{PORT} on other devices")
+            print("  Home network only: there is no login. Do not port-forward.")
         print("  Close the browser tab when finished, then stop this window.")
         print("=" * 52)
 
@@ -357,7 +382,7 @@ def main() -> None:
     threading.Thread(target=_background_worker, daemon=True).start()
     threading.Thread(target=_fuel_background_worker, daemon=True).start()
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    app.run(host=bind_host, port=PORT, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

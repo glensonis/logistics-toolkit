@@ -26,7 +26,7 @@ Do not "simplify" it to `--onefile` or re-enable UPX; both are what trip AV heur
 
 ## Architecture
 
-**One Flask app, two delivery modes.** `app.py` detects packaging via `sys.frozen` (`_is_frozen()`): when frozen it goes straight to serving, and when run from source it prints the startup banner and opens a browser. Port is hard-coded to **5000**.
+**One Flask app, two delivery modes.** `app.py` detects packaging via `sys.frozen` (`_is_frozen()`): when frozen it goes straight to serving, and when run from source it prints the startup banner and opens a browser. Port is hard-coded to **5000**. It binds `127.0.0.1` by default; `--lan` (or `LOGISTICS_LAN=1`) binds `0.0.0.0` for home-network sharing, and `Run Logistics Toolkit (LAN).bat` launches the exe that way.
 
 Business logic is split into focused modules that `app.py` imports and exposes as JSON routes:
 

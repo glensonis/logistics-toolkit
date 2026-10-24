@@ -49,6 +49,7 @@ def _resource_path(*parts: str) -> str:
 
 
 app = Flask(__name__, template_folder=_resource_path("templates"))
+app.json.allow_nan = False  # safety net: never emit bare NaN/Infinity
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB request body limit
 
 
@@ -172,43 +173,33 @@ def api_fuel_prices():
 
 @app.route("/api/convert")
 def api_convert():
-    data = _snapshot()
-    rates = data.get("rates") or {}
-
-    try:
-        amount = float(request.args.get("amount", "1"))
-    except ValueError:
-        return jsonify({"error": "Invalid amount"}), 400
-
-    from_ccy = request.args.get("from", "USD").upper()
-    to_ccy = request.args.get("to", "AED").upper()
-
-    if from_ccy not in CURRENCIES or to_ccy not in CURRENCIES:
-        return jsonify({"error": "Unsupported currency"}), 400
-
-    if from_ccy not in rates or to_ccy not in rates:
-        return jsonify({"error": "Rates not loaded yet"}), 503
-
-    from_rate = rates[from_ccy]["rate"]
-    to_rate = rates[to_ccy]["rate"]
-    if from_rate <= 0:
-        return jsonify({"error": "Invalid source rate"}), 500
-
-    usd_amount = amount / from_rate
-    converted = usd_amount * to_rate
-    cross_rate = to_rate / from_rate
-
-    return jsonify(
-        {
+    def run():
+        data = _snapshot() or {}
+        rates = data.get("rates") or {}
+        amount = _parse_num(request.args.get("amount"), "Amount", default=1, minimum=float("-inf"))
+        from_ccy = request.args.get("from", "USD").upper()
+        to_ccy = request.args.get("to", "AED").upper()
+        if from_ccy not in CURRENCIES or to_ccy not in CURRENCIES:
+            raise UserInputError("Unsupported currency")
+        try:
+            from_rate = float(rates[from_ccy]["rate"])
+            to_rate = float(rates[to_ccy]["rate"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            from_rate = to_rate = float("nan")
+        if not (math.isfinite(from_rate) and math.isfinite(to_rate)) or from_rate <= 0 or to_rate <= 0:
+            app.logger.warning("Rate feed returned unusable data for convert")
+            raise _Abort("Rates not loaded yet", 503)
+        return _ensure_finite({
             "from": from_ccy,
             "to": to_ccy,
             "amount": amount,
-            "result": converted,
-            "rate": cross_rate,
+            "result": amount / from_rate * to_rate,
+            "rate": to_rate / from_rate,
             "updated_at": data.get("updated_at"),
             "source": data.get("source"),
-        }
-    )
+        })
+
+    return _safe_call("Convert", run)
 
 
 GENERIC_400 = "Invalid input: please check the values and try again"

@@ -105,19 +105,7 @@ GCC_DG_FLEET: list[TruckSpec] = [
 ]
 
 
-def _num(value: Any, fallback: float = 0.0) -> float:
-    try:
-        n = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return fallback
-    if not math.isfinite(n):
-        raise UserInputError("Values must be finite numbers")
-    return n
-
-
 def _positive(value: float, field: str) -> float:
-    if not math.isfinite(value):
-        raise UserInputError(f"{field} must be a finite number")
     if value <= 0:
         raise UserInputError(f"{field} must be greater than zero")
     return value

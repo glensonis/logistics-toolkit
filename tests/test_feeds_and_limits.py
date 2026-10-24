@@ -155,3 +155,44 @@ def test_body_too_large_413(client, path):
     r = client.post(path, data=big, content_type="application/json")
     assert r.status_code == 413
     assert r.get_json() == {"error": "Request body too large (limit 1 MB)"}
+
+
+# ---- /api/convert ----
+import json  # noqa: E402
+
+RATES = {"rates": {"USD": {"rate": 1.0}, "AED": {"rate": 3.6725}}, "updated_at": None, "source": "OANDA"}
+
+
+@pytest.mark.parametrize("amount", ["inf", "nan", "-inf", "1e308", "9" * 400])
+def test_convert_non_finite_amount_400(client, amount):
+    with mock.patch.object(app_module, "_snapshot", return_value=RATES):
+        r = client.get(f"/api/convert?amount={amount}&from=USD&to=AED")
+    assert r.status_code == 400
+    body = json.loads(r.get_data(as_text=True))  # strict-ish: must parse
+    assert set(body) == {"error"}
+    assert "NaN" not in r.get_data(as_text=True) and "Infinity" not in r.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("rates", [
+    {"USD": {"rate": "x"}, "AED": {"rate": 3.67}},
+    {"USD": {"rate": 1.0}, "AED": {}},
+    {"USD": {"rate": 1.0}},
+    None,
+])
+def test_convert_bad_rate_503_json(client, rates):
+    with mock.patch.object(app_module, "_snapshot", return_value={"rates": rates}):
+        r = client.get("/api/convert?amount=10&from=USD&to=AED")
+    assert r.status_code == 503
+    assert r.is_json
+    assert r.get_json() == {"error": "Rates not loaded yet"}
+
+
+def test_convert_valid(client):
+    with mock.patch.object(app_module, "_snapshot", return_value=RATES):
+        r = client.get("/api/convert?amount=10&from=USD&to=AED")
+    assert r.status_code == 200
+    assert r.get_json()["result"] == pytest.approx(36.725)
+
+
+def test_allow_nan_disabled():
+    assert app_module.app.json.allow_nan is False

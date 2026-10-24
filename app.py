@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -11,6 +12,8 @@ import webbrowser
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
+from flask.json.provider import DefaultJSONProvider
+from werkzeug.exceptions import HTTPException
 
 from errors import UserInputError
 from fuel_fetcher import fetch_all_fuel_prices
@@ -49,8 +52,30 @@ def _resource_path(*parts: str) -> str:
 
 
 app = Flask(__name__, template_folder=_resource_path("templates"))
-app.json.allow_nan = False  # safety net: never emit bare NaN/Infinity
+
+
+class StrictJSONProvider(DefaultJSONProvider):
+    """JSON provider that refuses to emit bare NaN/Infinity (invalid JSON)."""
+
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dumps(obj, **kwargs)
+
+
+app.json = StrictJSONProvider(app)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB request body limit
+
+
+@app.errorhandler(Exception)
+def _unhandled(exc):
+    """Any uncaught error (incl. serialization ValueError) -> clean JSON, never HTML."""
+    if isinstance(exc, HTTPException):
+        resp = exc.get_response()
+        resp.data = json.dumps({"error": exc.name})
+        resp.content_type = "application/json"
+        return resp
+    app.logger.exception("Unhandled error")
+    return jsonify({"error": "Internal error while processing the request"}), 500
 
 
 @app.errorhandler(413)
@@ -151,7 +176,11 @@ def index():
 
 @app.route("/api/rates")
 def api_rates():
-    return jsonify(_snapshot())
+    snap = _snapshot()
+    if not _all_finite(snap):
+        app.logger.warning("Rates cache contains non-finite values")
+        return jsonify({"error": "Currency rates unavailable"}), 503
+    return jsonify(snap)
 
 
 def _fuel_snapshot() -> dict:
@@ -168,7 +197,11 @@ def _fuel_snapshot() -> dict:
 
 @app.route("/api/fuel-prices")
 def api_fuel_prices():
-    return jsonify(_fuel_snapshot())
+    snap = _fuel_snapshot()
+    if not _all_finite(snap):
+        app.logger.warning("Fuel cache contains non-finite values")
+        return jsonify({"error": "Fuel prices unavailable"}), 503
+    return jsonify(snap)
 
 
 @app.route("/api/convert")
@@ -232,7 +265,7 @@ class _Abort(Exception):
 def _safe_call(label, fn):
     """Run fn(); map errors to safe client responses, never echoing str(exc)."""
     try:
-        return jsonify(fn())
+        result = fn()
     except _Abort as exc:
         return jsonify({"error": exc.message}), exc.status
     except UserInputError as exc:
@@ -242,6 +275,11 @@ def _safe_call(label, fn):
         return jsonify({"error": GENERIC_400}), 400
     except Exception:
         app.logger.exception("%s failed", label)
+        return jsonify({"error": GENERIC_500}), 500
+    try:
+        return jsonify(result)
+    except ValueError:
+        app.logger.exception("%s produced a non-serializable result", label)
         return jsonify({"error": GENERIC_500}), 500
 
 

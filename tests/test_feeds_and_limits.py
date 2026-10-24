@@ -194,5 +194,70 @@ def test_convert_valid(client):
     assert r.get_json()["result"] == pytest.approx(36.725)
 
 
-def test_allow_nan_disabled():
-    assert app_module.app.json.allow_nan is False
+
+
+# ---- strict JSON provider / non-finite caches ----
+def _strict_parse(text):
+    def bad(c):
+        raise ValueError(c)
+    return json.loads(text, parse_constant=bad)
+
+
+@pytest.mark.parametrize("val", [float("nan"), float("inf")])
+def test_rates_cache_non_finite_503(client, val):
+    with app_module._cache_lock:
+        saved = dict(app_module._cache)
+        app_module._cache["rates"] = {"USD": {"rate": 1.0}, "AED": {"rate": val}}
+    try:
+        r = client.get("/api/rates")
+    finally:
+        with app_module._cache_lock:
+            app_module._cache.clear(); app_module._cache.update(saved)
+    assert r.status_code == 503
+    assert _strict_parse(r.get_data(as_text=True)) == {"error": "Currency rates unavailable"}
+
+
+@pytest.mark.parametrize("val", [float("nan"), float("-inf")])
+def test_fuel_cache_non_finite_503(client, val):
+    with app_module._fuel_lock:
+        saved = dict(app_module._fuel_cache)
+        app_module._fuel_cache["uae"] = {"currency": "AED", "grades": [{"name": "Diesel", "price": val}]}
+    try:
+        r = client.get("/api/fuel-prices")
+    finally:
+        with app_module._fuel_lock:
+            app_module._fuel_cache.clear(); app_module._fuel_cache.update(saved)
+    assert r.status_code == 503
+    assert _strict_parse(r.get_data(as_text=True)) == {"error": "Fuel prices unavailable"}
+
+
+def test_provider_rejects_nan():
+    assert isinstance(app_module.app.json, app_module.StrictJSONProvider)
+    with pytest.raises(ValueError):
+        app_module.app.json.dumps({"x": float("nan")})
+    with app_module.app.app_context():
+        with pytest.raises(ValueError):
+            app_module.jsonify({"x": float("inf")})
+
+
+def test_serialization_error_in_safe_call_is_json_500(client):
+    with app_module.app.test_request_context("/x"):
+        resp, status = app_module._safe_call("t", lambda: {"x": float("nan")})
+    assert status == 500
+    assert _strict_parse(resp.get_data(as_text=True)) == {"error": app_module.GENERIC_500}
+
+
+def test_uncaught_serialization_error_is_json_500(client):
+    app_module.app.config["PROPAGATE_EXCEPTIONS"] = False
+    with mock.patch.object(app_module, "_snapshot", return_value={"x": float("nan")}), \
+         mock.patch.object(app_module, "_all_finite", return_value=True):
+        r = client.get("/api/rates")
+    app_module.app.config["PROPAGATE_EXCEPTIONS"] = None
+    assert r.status_code == 500
+    assert r.is_json
+    assert _strict_parse(r.get_data(as_text=True)) == {"error": "Internal error while processing the request"}
+
+
+def test_unknown_route_404_is_json(client):
+    r = client.get("/definitely-not-here")
+    assert r.status_code == 404 and r.is_json

@@ -231,8 +231,8 @@ def _desk_post(handler):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
-        logger.exception("Desk tool failed")
-        return jsonify({"error": str(exc)}), 500
+        app.logger.exception("Desk tool failed: %s", exc)
+        return jsonify({"error": "Internal error while processing the request"}), 500
 
 
 @app.route("/api/quote", methods=["POST"])
@@ -245,27 +245,48 @@ def api_chargeable():
     return _desk_post(calculate_chargeable_weight)
 
 
+BAD_INPUT_MSG = "Invalid input: please provide valid non-negative numbers"
+
+
+def _parse_nonneg(value, default=None):
+    """Parse a non-negative finite float; raise ValueError on bad input."""
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        if default is None:
+            raise ValueError("missing")
+        return float(default)
+    if isinstance(value, bool):
+        raise ValueError("bool")
+    num = float(value)
+    if num != num or num in (float("inf"), float("-inf")) or num < 0:
+        raise ValueError("out of range")
+    return num
+
+
 @app.route("/api/fuel-surcharge")
 def api_fuel_surcharge():
-    baseline = float(request.args.get("baseline", 3.5))
-    current_param = request.args.get("current")
-    currency = "AED"
-    if current_param is not None:
-        current = float(current_param)
-        currency = request.args.get("currency", "LOCAL")
-    else:
-        snap = _fuel_snapshot()
-        uae = snap.get("uae") or {}
-        currency = uae.get("currency", "AED")
-        grades = uae.get("grades") or []
-        diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
-        if not diesel:
-            return jsonify({"error": "Diesel price unavailable"}), 503
-        current = float(diesel["price"])
     try:
+        baseline = _parse_nonneg(request.args.get("baseline"), default=3.5)
+        current_param = request.args.get("current")
+        currency = "AED"
+        if current_param is not None:
+            current = _parse_nonneg(current_param)
+            currency = request.args.get("currency", "LOCAL")
+        else:
+            snap = _fuel_snapshot()
+            uae = snap.get("uae") or {}
+            currency = uae.get("currency", "AED")
+            grades = uae.get("grades") or []
+            diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
+            if not diesel:
+                return jsonify({"error": "Diesel price unavailable"}), 503
+            current = float(diesel["price"])
         return jsonify(calculate_fuel_surcharge(baseline, current, currency=currency))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except (ValueError, TypeError) as exc:
+        app.logger.info("Bad fuel-surcharge input: %s", exc)
+        return jsonify({"error": BAD_INPUT_MSG}), 400
+    except Exception as exc:
+        app.logger.exception("Fuel surcharge failed: %s", exc)
+        return jsonify({"error": "Internal error while processing the request"}), 500
 
 
 @app.route("/api/receiving", methods=["POST"])
@@ -290,20 +311,31 @@ def api_fifo_fefo():
 
 @app.route("/api/landed-cost", methods=["POST"])
 def api_landed_cost():
-    body = request.get_json(silent=True) or {}
-    fx = float(body.get("fx_rate") or 0)
-    if fx <= 0:
-        data = _snapshot()
-        rates = data.get("rates") or {}
-        from_ccy = str(body.get("from_currency") or "USD").upper()
-        to_ccy = str(body.get("to_currency") or "AED").upper()
-        if from_ccy not in rates or to_ccy not in rates:
-            return jsonify({"error": "Rates not loaded"}), 503
-        fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({"error": BAD_INPUT_MSG}), 400
     try:
+        fx = _parse_nonneg(body.get("fx_rate"), default=0)
+        _parse_nonneg(body.get("goods_value"))
+        for key in ("quantity", "duty_percent", "vat_percent", "clearance_fees", "other_fees"):
+            _parse_nonneg(body.get(key), default=0)
+        if fx <= 0:
+            data = _snapshot()
+            rates = data.get("rates") or {}
+            from_ccy = str(body.get("from_currency") or "USD").upper()
+            to_ccy = str(body.get("to_currency") or "AED").upper()
+            if from_ccy not in rates or to_ccy not in rates:
+                return jsonify({"error": "Rates not loaded"}), 503
+            fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
         return jsonify(calculate_landed_cost(body, fx))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except (ValueError, TypeError) as exc:
+        app.logger.info("Bad landed-cost input: %s", exc)
+        return jsonify({"error": BAD_INPUT_MSG}), 400
+    except Exception as exc:
+        app.logger.exception("Landed cost failed: %s", exc)
+        return jsonify({"error": "Internal error while processing the request"}), 500
 
 
 @app.route("/api/doc-checklist", methods=["POST"])

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from errors import UserInputError
 
 from typing import Any
 
@@ -12,11 +13,11 @@ def calculate_chargeable_weight(payload: dict[str, Any]) -> dict[str, Any]:
     if preset == "custom":
         factor = float(payload.get("volumetric_factor") or 0)
         if factor <= 0:
-            raise ValueError("Enter a valid custom volumetric factor")
+            raise UserInputError("Enter a valid custom volumetric factor")
     else:
         factor = PRESETS.get(preset, 167)
     if actual <= 0 and volume <= 0:
-        raise ValueError("Enter actual weight or volume")
+        raise UserInputError("Enter actual weight or volume")
     vol_weight = volume * factor
     chargeable = max(actual, vol_weight)
     binding = "weight" if actual >= vol_weight else "volume"

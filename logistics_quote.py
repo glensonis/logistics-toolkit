@@ -1,4 +1,5 @@
 from __future__ import annotations
+from errors import UserInputError
 
 from typing import Any
 
@@ -25,15 +26,15 @@ def calculate_freight_quote(payload: dict[str, Any]) -> dict[str, Any]:
         })
         chargeable = ch["chargeable_weight_kg"]
         if chargeable <= 0:
-            raise ValueError("Enter weight or volume")
+            raise UserInputError("Enter weight or volume")
         base_freight = chargeable * base_rate
     elif basis == "per_cbm":
         if volume <= 0:
-            raise ValueError("Enter volume")
+            raise UserInputError("Enter volume")
         base_freight = volume * base_rate
     elif basis == "per_km":
         if distance <= 0:
-            raise ValueError("Enter distance")
+            raise UserInputError("Enter distance")
         base_freight = distance * base_rate
     else:
         base_freight = base_rate

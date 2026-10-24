@@ -1,4 +1,5 @@
 from __future__ import annotations
+from errors import UserInputError
 
 
 def calculate_fuel_surcharge(
@@ -9,7 +10,7 @@ def calculate_fuel_surcharge(
     unit: str = "per litre",
 ) -> dict:
     if baseline_price <= 0:
-        raise ValueError("Baseline must be greater than zero")
+        raise UserInputError("Baseline must be greater than zero")
     delta = current_price - baseline_price
     fsc = round((delta / baseline_price) * 100, 2)
     return {

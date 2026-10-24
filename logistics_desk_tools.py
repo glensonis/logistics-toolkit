@@ -1,5 +1,6 @@
 """Desk calculators — parity with glensonis.com/logistics APIs."""
 from __future__ import annotations
+from errors import UserInputError
 
 import math
 from datetime import date, datetime, timedelta
@@ -28,7 +29,7 @@ def _int(v: Any, fallback: int = 0) -> int:
 def _positive(v: Any, field: str) -> float:
     n = _num(v)
     if n <= 0:
-        raise ValueError(f"{field} must be greater than zero")
+        raise UserInputError(f"{field} must be greater than zero")
     return n
 
 
@@ -40,7 +41,7 @@ def _parse_date(v: Any, field: str) -> date:
     try:
         return date.fromisoformat(str(v)[:10])
     except ValueError as exc:
-        raise ValueError(f"Invalid {field}") from exc
+        raise UserInputError(f"Invalid {field}") from exc
 
 
 SEGREGATION_MATRIX: dict[str, list[str]] = {
@@ -135,7 +136,7 @@ def calculate_fifo_fefo(payload: dict[str, Any]) -> dict[str, Any]:
     delivery = _parse_date(payload.get("delivery_date"), "Delivery date")
     batches = payload.get("batches") or []
     if not batches:
-        raise ValueError("Add at least one batch")
+        raise UserInputError("Add at least one batch")
     parsed = []
     for i, b in enumerate(batches):
         row = b if isinstance(b, dict) else {}
@@ -206,7 +207,7 @@ def check_dg_segregation(payload: dict[str, Any]) -> dict[str, Any]:
     a = str(payload.get("class_a") or "").strip()
     b = str(payload.get("class_b") or "").strip()
     if a not in SEGREGATION_MATRIX or b not in SEGREGATION_MATRIX:
-        raise ValueError("Select two valid DG classes (1-9)")
+        raise UserInputError("Select two valid DG classes (1-9)")
     if a == b:
         return {"summary": "Same class — check quantity limits.", "compatible": True, "segregate": False}
     seg = b in SEGREGATION_MATRIX.get(a, []) or a in SEGREGATION_MATRIX.get(b, [])
@@ -279,7 +280,7 @@ def calculate_free_time(payload: dict[str, Any]) -> dict[str, Any]:
 def calculate_multi_stop(payload: dict[str, Any]) -> dict[str, Any]:
     stops = payload.get("stops") or []
     if not stops:
-        raise ValueError("Add at least one stop")
+        raise UserInputError("Add at least one stop")
     tw = tv = tp = 0.0
     for s in stops:
         row = s if isinstance(s, dict) else {}

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from errors import UserInputError
 
 import math
 import re
@@ -106,7 +107,7 @@ GCC_DG_FLEET: list[TruckSpec] = [
 
 def _positive(value: float, field: str) -> float:
     if value <= 0:
-        raise ValueError(f"{field} must be greater than zero")
+        raise UserInputError(f"{field} must be greater than zero")
     return value
 
 
@@ -216,17 +217,17 @@ def _validate_dg_payload(payload: dict[str, Any]) -> dict[str, Any]:
     dg_quantity_unit = str(payload.get("dg_quantity_unit") or "kg").lower()
 
     if not dg_class:
-        raise ValueError("Select a DG class for dangerous goods shipments")
+        raise UserInputError("Select a DG class for dangerous goods shipments")
     if dg_class not in DG_CLASSES:
-        raise ValueError("Invalid DG class")
+        raise UserInputError("Invalid DG class")
     if un_number and not re.fullmatch(r"UN\d{4}", un_number):
-        raise ValueError("UN number must look like UN1203")
+        raise UserInputError("UN number must look like UN1203")
     if packing_group not in PACKING_GROUPS:
-        raise ValueError("Invalid packing group")
+        raise UserInputError("Invalid packing group")
     if not proper_name:
-        raise ValueError("Enter the proper shipping name for DG cargo")
+        raise UserInputError("Enter the proper shipping name for DG cargo")
     if dg_quantity <= 0:
-        raise ValueError("Enter the net DG quantity")
+        raise UserInputError("Enter the net DG quantity")
 
     return {
         "dg_class": dg_class,
@@ -281,7 +282,7 @@ def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     bulk_liquid = bool(payload.get("bulk_liquid"))
 
     if total_weight_kg <= 0 and pallet_count <= 0:
-        raise ValueError("Enter total weight or pallet count")
+        raise UserInputError("Enter total weight or pallet count")
 
     dg_info = None
     if dangerous_goods:
@@ -334,7 +335,7 @@ def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
 
     primary_recs = recommend_from(primary_fleet)
     if not primary_recs:
-        raise ValueError("No suitable truck found for the selected cargo, DG class, and transport standard")
+        raise UserInputError("No suitable truck found for the selected cargo, DG class, and transport standard")
 
     secondary_recs = recommend_from(secondary_fleet)
 
@@ -424,7 +425,7 @@ def calculate_warehouse_space(payload: dict[str, Any]) -> dict[str, Any]:
     pallets_along_length = max(0, int((length_m - aisle_width_m) // pallet.length_m))
     pallets_along_width = max(0, int(width_m // pallet.width_m))
     if pallets_along_length <= 0 or pallets_along_width <= 0:
-        raise ValueError("Warehouse dimensions are too small for the selected pallet size")
+        raise UserInputError("Warehouse dimensions are too small for the selected pallet size")
 
     rows = pallets_along_width
     cols = pallets_along_length

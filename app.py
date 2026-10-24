@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import socket
 import sys
@@ -11,6 +12,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 
+from errors import UserInputError
 from fuel_fetcher import fetch_all_fuel_prices
 from logistics_calculators import calculate_truck_requirement, calculate_warehouse_space
 from logistics_chargeable import calculate_chargeable_weight
@@ -203,36 +205,68 @@ def api_convert():
     )
 
 
+GENERIC_400 = "Invalid input: please check the values and try again"
+GENERIC_500 = "Internal error while processing the request"
+BAD_JSON_MSG = "Malformed JSON request body"
+
+
+def _json_body():
+    """Return (body, error_response). Malformed JSON gets its own 400."""
+    raw = request.get_data(cache=True)
+    if not raw or not raw.strip():
+        return {}, None
+    body = request.get_json(silent=True)
+    if body is None:
+        return None, (jsonify({"error": BAD_JSON_MSG}), 400)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": GENERIC_400}), 400)
+    return body, None
+
+
+class _Abort(Exception):
+    """Carry a ready-made (safe) error response out of a handler."""
+
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _safe_call(label, fn):
+    """Run fn(); map errors to safe client responses, never echoing str(exc)."""
+    try:
+        return jsonify(fn())
+    except _Abort as exc:
+        return jsonify({"error": exc.message}), exc.status
+    except UserInputError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except (ValueError, TypeError, OverflowError) as exc:
+        app.logger.info("%s rejected input (%s)", label, type(exc).__name__)
+        return jsonify({"error": GENERIC_400}), 400
+    except Exception:
+        app.logger.exception("%s failed", label)
+        return jsonify({"error": GENERIC_500}), 500
+
+
+def _post_tool(label, handler):
+    body, err = _json_body()
+    if err:
+        return err
+    return _safe_call(label, lambda: handler(body))
+
+
 @app.route("/api/truck", methods=["POST"])
 def api_truck():
-    try:
-        return jsonify(calculate_truck_requirement(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Truck calculation failed")
-        return jsonify({"error": str(exc)}), 500
+    return _post_tool("Truck calculation", calculate_truck_requirement)
 
 
 @app.route("/api/warehouse", methods=["POST"])
 def api_warehouse():
-    try:
-        return jsonify(calculate_warehouse_space(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Warehouse calculation failed")
-        return jsonify({"error": str(exc)}), 500
+    return _post_tool("Warehouse calculation", calculate_warehouse_space)
 
 
 def _desk_post(handler):
-    try:
-        return jsonify(handler(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception("Desk tool failed: %s", exc)
-        return jsonify({"error": "Internal error while processing the request"}), 500
+    return _post_tool("Desk tool", handler)
 
 
 @app.route("/api/quote", methods=["POST"])
@@ -245,31 +279,48 @@ def api_chargeable():
     return _desk_post(calculate_chargeable_weight)
 
 
-BAD_INPUT_MSG = "Invalid input: please provide valid non-negative numbers"
+MAX_PERCENT = 1000.0
 
 
-def _parse_nonneg(value, default=None):
-    """Parse a non-negative finite float; raise ValueError on bad input."""
+def _parse_num(value, field, *, default=None, minimum=0.0, exclusive_min=False, maximum=None):
+    """Parse a finite float within bounds; raise UserInputError with a field-level message."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
         if default is None:
-            raise ValueError("missing")
+            raise UserInputError(f"{field} is required")
         return float(default)
     if isinstance(value, bool):
-        raise ValueError("bool")
-    num = float(value)
-    if num != num or num in (float("inf"), float("-inf")) or num < 0:
-        raise ValueError("out of range")
+        raise UserInputError(f"{field} must be a number")
+    try:
+        num = float(value)
+    except OverflowError:
+        raise UserInputError(f"{field} is too large") from None
+    except (TypeError, ValueError):
+        raise UserInputError(f"{field} must be a number") from None
+    if not math.isfinite(num):
+        raise UserInputError(f"{field} must be a finite number")
+    if exclusive_min and num <= minimum:
+        raise UserInputError(f"{field} must be greater than {minimum:g}")
+    if not exclusive_min and num < minimum:
+        raise UserInputError(f"{field} must be {minimum:g} or more")
+    if maximum is not None and num > maximum:
+        raise UserInputError(f"{field} must be {maximum:g} or less")
     return num
+
+
+def _ensure_finite(result):
+    for key, val in result.items():
+        if isinstance(val, float) and not math.isfinite(val):
+            raise UserInputError("Inputs are too large to calculate a result")
+    return result
 
 
 @app.route("/api/fuel-surcharge")
 def api_fuel_surcharge():
-    try:
-        baseline = _parse_nonneg(request.args.get("baseline"), default=3.5)
+    def run():
+        baseline = _parse_num(request.args.get("baseline"), "Baseline", default=3.5, exclusive_min=True)
         current_param = request.args.get("current")
-        currency = "AED"
         if current_param is not None:
-            current = _parse_nonneg(current_param)
+            current = _parse_num(current_param, "Current price")
             currency = request.args.get("currency", "LOCAL")
         else:
             snap = _fuel_snapshot()
@@ -278,15 +329,11 @@ def api_fuel_surcharge():
             grades = uae.get("grades") or []
             diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
             if not diesel:
-                return jsonify({"error": "Diesel price unavailable"}), 503
+                raise _Abort("Diesel price unavailable", 503)
             current = float(diesel["price"])
-        return jsonify(calculate_fuel_surcharge(baseline, current, currency=currency))
-    except (ValueError, TypeError) as exc:
-        app.logger.info("Bad fuel-surcharge input: %s", exc)
-        return jsonify({"error": BAD_INPUT_MSG}), 400
-    except Exception as exc:
-        app.logger.exception("Fuel surcharge failed: %s", exc)
-        return jsonify({"error": "Internal error while processing the request"}), 500
+        return _ensure_finite(calculate_fuel_surcharge(baseline, current, currency=currency))
+
+    return _safe_call("Fuel surcharge", run)
 
 
 @app.route("/api/receiving", methods=["POST"])
@@ -311,31 +358,39 @@ def api_fifo_fefo():
 
 @app.route("/api/landed-cost", methods=["POST"])
 def api_landed_cost():
-    body = request.get_json(silent=True)
-    if body is None:
-        body = {}
-    if not isinstance(body, dict):
-        return jsonify({"error": BAD_INPUT_MSG}), 400
-    try:
-        fx = _parse_nonneg(body.get("fx_rate"), default=0)
-        _parse_nonneg(body.get("goods_value"))
-        for key in ("quantity", "duty_percent", "vat_percent", "clearance_fees", "other_fees"):
-            _parse_nonneg(body.get(key), default=0)
+    body, err = _json_body()
+    if err:
+        return err
+
+    def run():
+        qty = _parse_num(body.get("quantity"), "Quantity", default=1, minimum=1)
+        if qty != int(qty):
+            raise UserInputError("Quantity must be a whole number")
+        clean = {
+            "goods_value": _parse_num(body.get("goods_value"), "Goods value", exclusive_min=True),
+            "quantity": int(qty),
+            "duty_percent": _parse_num(body.get("duty_percent"), "Duty %", default=0, maximum=MAX_PERCENT),
+            "vat_percent": _parse_num(body.get("vat_percent"), "VAT %", default=0, maximum=MAX_PERCENT),
+            "clearance_fees": _parse_num(body.get("clearance_fees"), "Clearance fees", default=0),
+            "other_fees": _parse_num(body.get("other_fees"), "Other fees", default=0),
+            "to_currency": str(body.get("to_currency") or "AED").upper(),
+        }
+        fx = _parse_num(body.get("fx_rate"), "FX rate", default=0)
         if fx <= 0:
             data = _snapshot()
             rates = data.get("rates") or {}
             from_ccy = str(body.get("from_currency") or "USD").upper()
-            to_ccy = str(body.get("to_currency") or "AED").upper()
+            to_ccy = clean["to_currency"]
             if from_ccy not in rates or to_ccy not in rates:
-                return jsonify({"error": "Rates not loaded"}), 503
+                raise _Abort("Rates not loaded", 503)
             fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
-        return jsonify(calculate_landed_cost(body, fx))
-    except (ValueError, TypeError) as exc:
-        app.logger.info("Bad landed-cost input: %s", exc)
-        return jsonify({"error": BAD_INPUT_MSG}), 400
-    except Exception as exc:
-        app.logger.exception("Landed cost failed: %s", exc)
-        return jsonify({"error": "Internal error while processing the request"}), 500
+        try:
+            result = calculate_landed_cost(clean, fx)
+        except OverflowError:
+            raise UserInputError("Inputs are too large to calculate a result") from None
+        return _ensure_finite(result)
+
+    return _safe_call("Landed cost", run)
 
 
 @app.route("/api/doc-checklist", methods=["POST"])

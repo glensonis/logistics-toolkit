@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 from flask.json.provider import DefaultJSONProvider
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, InternalServerError
 
 from errors import UserInputError
 from fuel_fetcher import fetch_all_fuel_prices
@@ -66,20 +66,30 @@ app.json = StrictJSONProvider(app)
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB request body limit
 
 
+def _is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
 @app.errorhandler(Exception)
 def _unhandled(exc):
-    """Any uncaught error (incl. serialization ValueError) -> clean JSON, never HTML."""
+    """/api/* errors -> clean JSON; other paths -> Werkzeug defaults. Never leak exc text."""
     if isinstance(exc, HTTPException):
+        if not _is_api_request():
+            return exc
         resp = exc.get_response()
         resp.data = json.dumps({"error": exc.name})
         resp.content_type = "application/json"
         return resp
     app.logger.exception("Unhandled error")
+    if not _is_api_request():
+        return InternalServerError()
     return jsonify({"error": "Internal error while processing the request"}), 500
 
 
 @app.errorhandler(413)
-def _too_large(_exc):
+def _too_large(exc):
+    if not _is_api_request():
+        return exc
     return jsonify({"error": "Request body too large (limit 1 MB)"}), 413
 
 _cache_lock = threading.Lock()
@@ -426,10 +436,12 @@ def api_landed_cost():
             "to_currency": str(body.get("to_currency") or "AED").upper(),
         }
         fx = _parse_num(body.get("fx_rate"), "FX rate", default=0)
+        from_ccy = str(body.get("from_currency") or "USD").upper()
+        if from_ccy not in CURRENCIES or clean["to_currency"] not in CURRENCIES:
+            raise UserInputError("Unsupported currency")
         if fx <= 0:
             data = _snapshot() or {}
             rates = data.get("rates") or {}
-            from_ccy = str(body.get("from_currency") or "USD").upper()
             to_ccy = clean["to_currency"]
             if from_ccy not in rates or to_ccy not in rates:
                 raise _Abort("Rates not loaded", 503)

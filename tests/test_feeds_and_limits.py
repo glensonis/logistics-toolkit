@@ -258,6 +258,39 @@ def test_uncaught_serialization_error_is_json_500(client):
     assert _strict_parse(r.get_data(as_text=True)) == {"error": "Internal error while processing the request"}
 
 
-def test_unknown_route_404_is_json(client):
-    r = client.get("/definitely-not-here")
+def test_unknown_api_route_404_is_json(client):
+    r = client.get("/api/nope")
     assert r.status_code == 404 and r.is_json
+    assert r.get_json() == {"error": "Not Found"}
+
+
+def test_unknown_page_route_404_is_not_json(client):
+    r = client.get("/nope")
+    assert r.status_code == 404
+    assert not r.is_json
+    assert "Traceback" not in r.get_data(as_text=True)
+
+
+def test_non_api_unhandled_error_is_default_500(client):
+    app_module.app.config["PROPAGATE_EXCEPTIONS"] = False
+    with mock.patch.object(app_module, "render_template", side_effect=RuntimeError(SECRET)):
+        r = client.get("/")
+    app_module.app.config["PROPAGATE_EXCEPTIONS"] = None
+    assert r.status_code == 500 and not r.is_json
+    text = r.get_data(as_text=True)
+    assert SECRET not in text and "Traceback" not in text
+
+
+def test_quote_over_1mb_json_413(client):
+    big = '{"x":"' + "a" * (1024 * 1024 + 10) + '"}'
+    r = client.post("/api/quote", data=big, content_type="application/json")
+    assert r.status_code == 413 and r.is_json
+    assert r.get_json() == {"error": "Request body too large (limit 1 MB)"}
+
+
+@pytest.mark.parametrize("field", ["to_currency", "from_currency"])
+def test_landed_cost_unsupported_currency_400(client, field):
+    with mock.patch.object(app_module, "_snapshot", return_value=RATES):
+        r = client.post("/api/landed-cost", json={"goods_value": 100, "quantity": 1, field: "XYZ"})
+    assert r.status_code == 400
+    assert r.get_json() == {"error": "Unsupported currency"}

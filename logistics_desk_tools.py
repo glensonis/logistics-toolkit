@@ -17,9 +17,12 @@ def _round2(n: float) -> float:
 
 def _num(v: Any, fallback: float = 0) -> float:
     try:
-        return float(v)
-    except (TypeError, ValueError):
+        n = float(v)
+    except (TypeError, ValueError, OverflowError):
         return fallback
+    if not math.isfinite(n):
+        raise UserInputError("Values must be finite numbers")
+    return n
 
 
 def _int(v: Any, fallback: int = 0) -> int:

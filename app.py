@@ -49,6 +49,12 @@ def _resource_path(*parts: str) -> str:
 
 
 app = Flask(__name__, template_folder=_resource_path("templates"))
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB request body limit
+
+
+@app.errorhandler(413)
+def _too_large(_exc):
+    return jsonify({"error": "Request body too large (limit 1 MB)"}), 413
 
 _cache_lock = threading.Lock()
 _cache: dict = {
@@ -86,10 +92,10 @@ def _refresh_rates() -> None:
             )
             _cache["errors"] = payload.get("errors", [])
         logger.info("Rates updated successfully")
-    except Exception as exc:
+    except Exception:
         logger.exception("Rate refresh failed")
         with _cache_lock:
-            _cache["errors"] = [str(exc)]
+            _cache["errors"] = ["Currency rates unavailable"]
 
 
 def _refresh_fuel_prices() -> None:
@@ -106,10 +112,10 @@ def _refresh_fuel_prices() -> None:
             )
             _fuel_cache["errors"] = payload.get("errors", [])
         logger.info("Fuel prices updated successfully")
-    except Exception as exc:
+    except Exception:
         logger.exception("Fuel price refresh failed")
         with _fuel_lock:
-            _fuel_cache["errors"] = [str(exc)]
+            _fuel_cache["errors"] = ["Fuel prices unavailable"]
 
 
 def _background_worker() -> None:
@@ -252,7 +258,7 @@ def _post_tool(label, handler):
     body, err = _json_body()
     if err:
         return err
-    return _safe_call(label, lambda: handler(body))
+    return _safe_call(label, lambda: _ensure_finite(handler(body)))
 
 
 @app.route("/api/truck", methods=["POST"])
@@ -307,10 +313,19 @@ def _parse_num(value, field, *, default=None, minimum=0.0, exclusive_min=False, 
     return num
 
 
+def _all_finite(value) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_all_finite(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_all_finite(v) for v in value)
+    return True
+
+
 def _ensure_finite(result):
-    for key, val in result.items():
-        if isinstance(val, float) and not math.isfinite(val):
-            raise UserInputError("Inputs are too large to calculate a result")
+    if not _all_finite(result):
+        raise UserInputError("Inputs are too large to calculate a result")
     return result
 
 
@@ -323,14 +338,20 @@ def api_fuel_surcharge():
             current = _parse_num(current_param, "Current price")
             currency = request.args.get("currency", "LOCAL")
         else:
-            snap = _fuel_snapshot()
+            snap = _fuel_snapshot() or {}
             uae = snap.get("uae") or {}
             currency = uae.get("currency", "AED")
             grades = uae.get("grades") or []
             diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
             if not diesel:
                 raise _Abort("Diesel price unavailable", 503)
-            current = float(diesel["price"])
+            try:
+                current = float(diesel["price"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                current = float("nan")
+            if not math.isfinite(current) or current < 0:
+                app.logger.warning("Fuel feed returned an unusable diesel price")
+                raise _Abort("Diesel price unavailable", 503)
         return _ensure_finite(calculate_fuel_surcharge(baseline, current, currency=currency))
 
     return _safe_call("Fuel surcharge", run)
@@ -377,13 +398,19 @@ def api_landed_cost():
         }
         fx = _parse_num(body.get("fx_rate"), "FX rate", default=0)
         if fx <= 0:
-            data = _snapshot()
+            data = _snapshot() or {}
             rates = data.get("rates") or {}
             from_ccy = str(body.get("from_currency") or "USD").upper()
             to_ccy = clean["to_currency"]
             if from_ccy not in rates or to_ccy not in rates:
                 raise _Abort("Rates not loaded", 503)
-            fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
+            try:
+                fx = float(rates[to_ccy]["rate"]) / float(rates[from_ccy]["rate"])
+            except (KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+                fx = float("nan")
+            if not math.isfinite(fx) or fx <= 0:
+                app.logger.warning("Rate feed returned unusable data")
+                raise _Abort("Rates not loaded", 503)
         try:
             result = calculate_landed_cost(clean, fx)
         except OverflowError:

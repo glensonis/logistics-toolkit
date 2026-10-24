@@ -1,5 +1,5 @@
 from __future__ import annotations
-from errors import UserInputError
+from errors import UserInputError, finite_float as _finite
 
 from typing import Any
 
@@ -7,11 +7,11 @@ PRESETS = {"road_167": 167, "road_333": 333, "air_167": 167}
 
 
 def calculate_chargeable_weight(payload: dict[str, Any]) -> dict[str, Any]:
-    actual = max(0.0, float(payload.get("actual_weight_kg") or 0))
-    volume = max(0.0, float(payload.get("volume_cbm") or 0))
+    actual = max(0.0, _finite(payload.get("actual_weight_kg") or 0))
+    volume = max(0.0, _finite(payload.get("volume_cbm") or 0))
     preset = str(payload.get("volumetric_preset") or "road_167")
     if preset == "custom":
-        factor = float(payload.get("volumetric_factor") or 0)
+        factor = _finite(payload.get("volumetric_factor") or 0)
         if factor <= 0:
             raise UserInputError("Enter a valid custom volumetric factor")
     else:

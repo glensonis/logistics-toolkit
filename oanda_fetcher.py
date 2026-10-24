@@ -89,11 +89,11 @@ def fetch_all_rates() -> dict[str, Any]:
             rates[code] = fetch_usd_rate(code, session=session)
         except Exception as exc:
             logger.exception("Failed to fetch USD->%s", code)
-            errors.append(f"{code}: {exc}")
+            errors.append(f"{code} rate unavailable")
 
     if len(rates) < 2:
         raise RuntimeError(
-            "Unable to load enough OANDA rates. " + "; ".join(errors)
+            "Unable to load enough OANDA rates"
         )
 
     return {

@@ -77,7 +77,7 @@ def _http_get(
         response.raise_for_status()
         return response.text
     except RequestException as exc:
-        raise RuntimeError(f"Failed to fetch {url}: {exc}") from exc
+        raise RuntimeError("Fuel price source request failed") from exc
 
 
 def _parse_month_label(html: str) -> str | None:
@@ -239,7 +239,7 @@ def fetch_all_fuel_prices() -> dict[str, Any]:
         uae = _parse_uae_prices(uae_html)
     except Exception as exc:
         logger.exception("Failed to fetch UAE fuel prices")
-        errors.append(f"UAE: {exc}")
+        errors.append("UAE prices unavailable")
 
     saudi: dict[str, Any] | None = None
     try:
@@ -256,11 +256,11 @@ def fetch_all_fuel_prices() -> dict[str, Any]:
             gcc.append(_fetch_gpp_country(session, meta))
         except Exception as exc:
             logger.exception("Failed to fetch fuel prices for %s", meta["name"])
-            errors.append(f"{meta['name']}: {exc}")
+            errors.append(f"{meta['name']} prices unavailable")
 
     if uae is None and not gcc:
         raise RuntimeError(
-            "Unable to load fuel prices. " + "; ".join(errors)
+            "Unable to load fuel prices"
         )
 
     now = datetime.now(timezone.utc)

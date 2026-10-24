@@ -52,6 +52,10 @@ xcopy /E /I /Y "dist\LogisticsToolkit" "%FINAL_DIR%LogisticsToolkit" >nul
 >> "%FINAL_DIR%Run Logistics Toolkit.bat" echo cd /d "%%~dp0LogisticsToolkit"
 >> "%FINAL_DIR%Run Logistics Toolkit.bat" echo start "" "LogisticsToolkit.exe"
 
+> "%FINAL_DIR%Run Logistics Toolkit (LAN).bat" echo @echo off
+>> "%FINAL_DIR%Run Logistics Toolkit (LAN).bat" echo cd /d "%%~dp0LogisticsToolkit"
+>> "%FINAL_DIR%Run Logistics Toolkit (LAN).bat" echo start "" "LogisticsToolkit.exe" --lan
+
 if exist "%DEFENDER%" (
   echo Running final Defender check on delivered build...
   "%DEFENDER%" -Scan -ScanType 3 -File "%FINAL_DIR%LogisticsToolkit\LogisticsToolkit.exe"
@@ -68,6 +72,7 @@ if exist "LogisticsToolkit.spec" del /F /Q "LogisticsToolkit.spec" >nul 2>&1
 echo.
 echo Done. Defender-approved final product:
 echo   %FINAL_DIR%Run Logistics Toolkit.bat
+echo   %FINAL_DIR%Run Logistics Toolkit (LAN).bat
 echo   %FINAL_DIR%LogisticsToolkit\LogisticsToolkit.exe
 
 endlocal

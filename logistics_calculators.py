@@ -1,4 +1,5 @@
 from __future__ import annotations
+from errors import UserInputError, finite_float as _finite
 
 import math
 import re
@@ -106,7 +107,7 @@ GCC_DG_FLEET: list[TruckSpec] = [
 
 def _positive(value: float, field: str) -> float:
     if value <= 0:
-        raise ValueError(f"{field} must be greater than zero")
+        raise UserInputError(f"{field} must be greater than zero")
     return value
 
 
@@ -212,21 +213,21 @@ def _validate_dg_payload(payload: dict[str, Any]) -> dict[str, Any]:
     limited_quantity = bool(payload.get("limited_quantity"))
     marine_pollutant = bool(payload.get("marine_pollutant"))
     flash_point_c = payload.get("flash_point_c")
-    dg_quantity = float(payload.get("dg_quantity") or 0)
+    dg_quantity = _finite(payload.get("dg_quantity") or 0)
     dg_quantity_unit = str(payload.get("dg_quantity_unit") or "kg").lower()
 
     if not dg_class:
-        raise ValueError("Select a DG class for dangerous goods shipments")
+        raise UserInputError("Select a DG class for dangerous goods shipments")
     if dg_class not in DG_CLASSES:
-        raise ValueError("Invalid DG class")
+        raise UserInputError("Invalid DG class")
     if un_number and not re.fullmatch(r"UN\d{4}", un_number):
-        raise ValueError("UN number must look like UN1203")
+        raise UserInputError("UN number must look like UN1203")
     if packing_group not in PACKING_GROUPS:
-        raise ValueError("Invalid packing group")
+        raise UserInputError("Invalid packing group")
     if not proper_name:
-        raise ValueError("Enter the proper shipping name for DG cargo")
+        raise UserInputError("Enter the proper shipping name for DG cargo")
     if dg_quantity <= 0:
-        raise ValueError("Enter the net DG quantity")
+        raise UserInputError("Enter the net DG quantity")
 
     return {
         "dg_class": dg_class,
@@ -264,16 +265,16 @@ def _dg_compliance_notes(dg_info: dict[str, Any], primary: dict[str, Any]) -> li
 
 
 def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
-    total_weight_kg = float(payload.get("total_weight_kg") or 0)
-    total_volume_cbm = float(payload.get("total_volume_cbm") or 0)
+    total_weight_kg = _finite(payload.get("total_weight_kg") or 0)
+    total_volume_cbm = _finite(payload.get("total_volume_cbm") or 0)
     pallet_count = int(payload.get("pallet_count") or 0)
     pallet_type = str(payload.get("pallet_type") or "standard").lower()
     stack_levels = max(1, int(payload.get("stack_levels") or 1))
-    pallet_weight_kg = float(payload.get("pallet_weight_kg") or 0)
-    pallet_height_m = float(payload.get("pallet_height_m") or 0)
-    custom_length_m = float(payload.get("custom_length_m") or 1.2)
-    custom_width_m = float(payload.get("custom_width_m") or 1.0)
-    safety_margin_pct = max(0.0, float(payload.get("safety_margin_pct") or 10))
+    pallet_weight_kg = _finite(payload.get("pallet_weight_kg") or 0)
+    pallet_height_m = _finite(payload.get("pallet_height_m") or 0)
+    custom_length_m = _finite(payload.get("custom_length_m") or 1.2)
+    custom_width_m = _finite(payload.get("custom_width_m") or 1.0)
+    safety_margin_pct = max(0.0, _finite(payload.get("safety_margin_pct") or 10))
     temperature_controlled = bool(payload.get("temperature_controlled"))
     oversized = bool(payload.get("oversized"))
     dangerous_goods = bool(payload.get("dangerous_goods"))
@@ -281,7 +282,7 @@ def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
     bulk_liquid = bool(payload.get("bulk_liquid"))
 
     if total_weight_kg <= 0 and pallet_count <= 0:
-        raise ValueError("Enter total weight or pallet count")
+        raise UserInputError("Enter total weight or pallet count")
 
     dg_info = None
     if dangerous_goods:
@@ -334,7 +335,7 @@ def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
 
     primary_recs = recommend_from(primary_fleet)
     if not primary_recs:
-        raise ValueError("No suitable truck found for the selected cargo, DG class, and transport standard")
+        raise UserInputError("No suitable truck found for the selected cargo, DG class, and transport standard")
 
     secondary_recs = recommend_from(secondary_fleet)
 
@@ -391,20 +392,20 @@ def calculate_truck_requirement(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def calculate_warehouse_space(payload: dict[str, Any]) -> dict[str, Any]:
-    length_m = _positive(float(payload.get("length_m") or 0), "Warehouse length")
-    width_m = _positive(float(payload.get("width_m") or 0), "Warehouse width")
-    height_m = _positive(float(payload.get("height_m") or 0), "Warehouse height")
-    aisle_width_m = _positive(float(payload.get("aisle_width_m") or 3.0), "Aisle width")
-    staging_pct = min(50.0, max(0.0, float(payload.get("staging_pct") or 15)))
-    clearance_pct = min(30.0, max(0.0, float(payload.get("clearance_pct") or 10)))
+    length_m = _positive(_finite(payload.get("length_m") or 0), "Warehouse length")
+    width_m = _positive(_finite(payload.get("width_m") or 0), "Warehouse width")
+    height_m = _positive(_finite(payload.get("height_m") or 0), "Warehouse height")
+    aisle_width_m = _positive(_finite(payload.get("aisle_width_m") or 3.0), "Aisle width")
+    staging_pct = min(50.0, max(0.0, _finite(payload.get("staging_pct") or 15)))
+    clearance_pct = min(30.0, max(0.0, _finite(payload.get("clearance_pct") or 10)))
 
     pallet_type = str(payload.get("pallet_type") or "standard").lower()
-    custom_length_m = float(payload.get("custom_length_m") or 1.2)
-    custom_width_m = float(payload.get("custom_width_m") or 1.0)
-    pallet_height_m = float(payload.get("pallet_height_m") or 0)
+    custom_length_m = _finite(payload.get("custom_length_m") or 1.2)
+    custom_width_m = _finite(payload.get("custom_width_m") or 1.0)
+    pallet_height_m = _finite(payload.get("pallet_height_m") or 0)
     stack_levels = max(1, int(payload.get("stack_levels") or 3))
     inventory_pallets = max(0, int(payload.get("inventory_pallets") or 0))
-    inventory_weight_kg = max(0.0, float(payload.get("inventory_weight_kg") or 0))
+    inventory_weight_kg = max(0.0, _finite(payload.get("inventory_weight_kg") or 0))
 
     pallet = _pallet_spec(pallet_type, custom_length_m, custom_width_m)
     per_pallet_height = pallet_height_m or pallet.default_height_m
@@ -424,7 +425,7 @@ def calculate_warehouse_space(payload: dict[str, Any]) -> dict[str, Any]:
     pallets_along_length = max(0, int((length_m - aisle_width_m) // pallet.length_m))
     pallets_along_width = max(0, int(width_m // pallet.width_m))
     if pallets_along_length <= 0 or pallets_along_width <= 0:
-        raise ValueError("Warehouse dimensions are too small for the selected pallet size")
+        raise UserInputError("Warehouse dimensions are too small for the selected pallet size")
 
     rows = pallets_along_width
     cols = pallets_along_length

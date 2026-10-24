@@ -909,11 +909,11 @@
         <section class="card">
           <h2>Landed Cost</h2>
           <div class="grid-2eq">
-            <div><label>Goods value</label><input data-field="goods_value" type="number" step="any" value="10000"></div>
-            <div><label>Quantity</label><input data-field="quantity" type="number" step="1" value="100"></div>
-            <div><label>Duty %</label><input data-field="duty_percent" type="number" step="any" value="5"></div>
-            <div><label>VAT %</label><input data-field="vat_percent" type="number" step="any" value="5"></div>
-            <div><label>Clearance fees</label><input data-field="clearance_fees" type="number" step="any" value="500"></div>
+            <div><label>Goods value</label><input data-field="goods_value" type="number" step="any" min="0.01" value="10000"></div>
+            <div><label>Quantity</label><input data-field="quantity" type="number" step="1" min="1" value="100"></div>
+            <div><label>Duty %</label><input data-field="duty_percent" type="number" step="any" min="0" max="1000" value="5"></div>
+            <div><label>VAT %</label><input data-field="vat_percent" type="number" step="any" min="0" max="1000" value="5"></div>
+            <div><label>Clearance fees</label><input data-field="clearance_fees" type="number" step="any" min="0" value="500"></div>
             <div><label>From currency</label><input data-field="from_currency" type="text" value="USD" maxlength="3"></div>
             <div><label>To currency</label><input data-field="to_currency" type="text" value="AED" maxlength="3"></div>
           </div>
@@ -1382,6 +1382,12 @@
 
       btn.addEventListener("click", async () => {
         errorEl.textContent = "";
+        const invalid = Array.from(mainEl.querySelectorAll("input[type=number][data-field]")).find((el) => !el.checkValidity());
+        if (invalid) {
+          errorEl.textContent = invalid.validationMessage || "Please check the highlighted value";
+          invalid.reportValidity();
+          return;
+        }
         const payload = {};
         mainEl.querySelectorAll("[data-field]").forEach((el) => {
           const key = el.dataset.field;

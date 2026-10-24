@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
+import socket
 import sys
 import threading
 import time
@@ -9,7 +12,10 @@ import webbrowser
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
+from flask.json.provider import DefaultJSONProvider
+from werkzeug.exceptions import HTTPException, InternalServerError
 
+from errors import UserInputError
 from fuel_fetcher import fetch_all_fuel_prices
 from logistics_calculators import calculate_truck_requirement, calculate_warehouse_space
 from logistics_chargeable import calculate_chargeable_weight
@@ -36,6 +42,7 @@ logger = logging.getLogger(__name__)
 REFRESH_INTERVAL_SECONDS = 5 * 60
 FUEL_REFRESH_INTERVAL_SECONDS = 60 * 60
 HOST = "127.0.0.1"
+LAN_HOST = "0.0.0.0"
 PORT = 5000
 
 
@@ -45,6 +52,45 @@ def _resource_path(*parts: str) -> str:
 
 
 app = Flask(__name__, template_folder=_resource_path("templates"))
+
+
+class StrictJSONProvider(DefaultJSONProvider):
+    """JSON provider that refuses to emit bare NaN/Infinity (invalid JSON)."""
+
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dumps(obj, **kwargs)
+
+
+app.json = StrictJSONProvider(app)
+app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024  # 1 MB request body limit
+
+
+def _is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
+@app.errorhandler(Exception)
+def _unhandled(exc):
+    """/api/* errors -> clean JSON; other paths -> Werkzeug defaults. Never leak exc text."""
+    if isinstance(exc, HTTPException):
+        if not _is_api_request():
+            return exc
+        resp = exc.get_response()
+        resp.data = json.dumps({"error": exc.name})
+        resp.content_type = "application/json"
+        return resp
+    app.logger.exception("Unhandled error")
+    if not _is_api_request():
+        return InternalServerError()
+    return jsonify({"error": "Internal error while processing the request"}), 500
+
+
+@app.errorhandler(413)
+def _too_large(exc):
+    if not _is_api_request():
+        return exc
+    return jsonify({"error": "Request body too large (limit 1 MB)"}), 413
 
 _cache_lock = threading.Lock()
 _cache: dict = {
@@ -82,10 +128,10 @@ def _refresh_rates() -> None:
             )
             _cache["errors"] = payload.get("errors", [])
         logger.info("Rates updated successfully")
-    except Exception as exc:
+    except Exception:
         logger.exception("Rate refresh failed")
         with _cache_lock:
-            _cache["errors"] = [str(exc)]
+            _cache["errors"] = ["Currency rates unavailable"]
 
 
 def _refresh_fuel_prices() -> None:
@@ -102,10 +148,10 @@ def _refresh_fuel_prices() -> None:
             )
             _fuel_cache["errors"] = payload.get("errors", [])
         logger.info("Fuel prices updated successfully")
-    except Exception as exc:
+    except Exception:
         logger.exception("Fuel price refresh failed")
         with _fuel_lock:
-            _fuel_cache["errors"] = [str(exc)]
+            _fuel_cache["errors"] = ["Fuel prices unavailable"]
 
 
 def _background_worker() -> None:
@@ -140,7 +186,11 @@ def index():
 
 @app.route("/api/rates")
 def api_rates():
-    return jsonify(_snapshot())
+    snap = _snapshot()
+    if not _all_finite(snap):
+        app.logger.warning("Rates cache contains non-finite values")
+        return jsonify({"error": "Currency rates unavailable"}), 503
+    return jsonify(snap)
 
 
 def _fuel_snapshot() -> dict:
@@ -157,80 +207,111 @@ def _fuel_snapshot() -> dict:
 
 @app.route("/api/fuel-prices")
 def api_fuel_prices():
-    return jsonify(_fuel_snapshot())
+    snap = _fuel_snapshot()
+    if not _all_finite(snap):
+        app.logger.warning("Fuel cache contains non-finite values")
+        return jsonify({"error": "Fuel prices unavailable"}), 503
+    return jsonify(snap)
 
 
 @app.route("/api/convert")
 def api_convert():
-    data = _snapshot()
-    rates = data.get("rates") or {}
-
-    try:
-        amount = float(request.args.get("amount", "1"))
-    except ValueError:
-        return jsonify({"error": "Invalid amount"}), 400
-
-    from_ccy = request.args.get("from", "USD").upper()
-    to_ccy = request.args.get("to", "AED").upper()
-
-    if from_ccy not in CURRENCIES or to_ccy not in CURRENCIES:
-        return jsonify({"error": "Unsupported currency"}), 400
-
-    if from_ccy not in rates or to_ccy not in rates:
-        return jsonify({"error": "Rates not loaded yet"}), 503
-
-    from_rate = rates[from_ccy]["rate"]
-    to_rate = rates[to_ccy]["rate"]
-    if from_rate <= 0:
-        return jsonify({"error": "Invalid source rate"}), 500
-
-    usd_amount = amount / from_rate
-    converted = usd_amount * to_rate
-    cross_rate = to_rate / from_rate
-
-    return jsonify(
-        {
+    def run():
+        data = _snapshot() or {}
+        rates = data.get("rates") or {}
+        amount = _parse_num(request.args.get("amount"), "Amount", default=1, minimum=float("-inf"))
+        from_ccy = request.args.get("from", "USD").upper()
+        to_ccy = request.args.get("to", "AED").upper()
+        if from_ccy not in CURRENCIES or to_ccy not in CURRENCIES:
+            raise UserInputError("Unsupported currency")
+        try:
+            from_rate = float(rates[from_ccy]["rate"])
+            to_rate = float(rates[to_ccy]["rate"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            from_rate = to_rate = float("nan")
+        if not (math.isfinite(from_rate) and math.isfinite(to_rate)) or from_rate <= 0 or to_rate <= 0:
+            app.logger.warning("Rate feed returned unusable data for convert")
+            raise _Abort("Rates not loaded yet", 503)
+        return _ensure_finite({
             "from": from_ccy,
             "to": to_ccy,
             "amount": amount,
-            "result": converted,
-            "rate": cross_rate,
+            "result": amount / from_rate * to_rate,
+            "rate": to_rate / from_rate,
             "updated_at": data.get("updated_at"),
             "source": data.get("source"),
-        }
-    )
+        })
+
+    return _safe_call("Convert", run)
+
+
+GENERIC_400 = "Invalid input: please check the values and try again"
+GENERIC_500 = "Internal error while processing the request"
+BAD_JSON_MSG = "Malformed JSON request body"
+
+
+def _json_body():
+    """Return (body, error_response). Malformed JSON gets its own 400."""
+    raw = request.get_data(cache=True)
+    if not raw or not raw.strip():
+        return {}, None
+    body = request.get_json(silent=True)
+    if body is None:
+        return None, (jsonify({"error": BAD_JSON_MSG}), 400)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": GENERIC_400}), 400)
+    return body, None
+
+
+class _Abort(Exception):
+    """Carry a ready-made (safe) error response out of a handler."""
+
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _safe_call(label, fn):
+    """Run fn(); map errors to safe client responses, never echoing str(exc)."""
+    try:
+        result = fn()
+    except _Abort as exc:
+        return jsonify({"error": exc.message}), exc.status
+    except UserInputError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except (ValueError, TypeError, OverflowError) as exc:
+        app.logger.info("%s rejected input (%s)", label, type(exc).__name__)
+        return jsonify({"error": GENERIC_400}), 400
+    except Exception:
+        app.logger.exception("%s failed", label)
+        return jsonify({"error": GENERIC_500}), 500
+    try:
+        return jsonify(result)
+    except ValueError:
+        app.logger.exception("%s produced a non-serializable result", label)
+        return jsonify({"error": GENERIC_500}), 500
+
+
+def _post_tool(label, handler):
+    body, err = _json_body()
+    if err:
+        return err
+    return _safe_call(label, lambda: _ensure_finite(handler(body)))
 
 
 @app.route("/api/truck", methods=["POST"])
 def api_truck():
-    try:
-        return jsonify(calculate_truck_requirement(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Truck calculation failed")
-        return jsonify({"error": str(exc)}), 500
+    return _post_tool("Truck calculation", calculate_truck_requirement)
 
 
 @app.route("/api/warehouse", methods=["POST"])
 def api_warehouse():
-    try:
-        return jsonify(calculate_warehouse_space(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Warehouse calculation failed")
-        return jsonify({"error": str(exc)}), 500
+    return _post_tool("Warehouse calculation", calculate_warehouse_space)
 
 
 def _desk_post(handler):
-    try:
-        return jsonify(handler(request.get_json(silent=True) or {}))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logger.exception("Desk tool failed")
-        return jsonify({"error": str(exc)}), 500
+    return _post_tool("Desk tool", handler)
 
 
 @app.route("/api/quote", methods=["POST"])
@@ -243,27 +324,76 @@ def api_chargeable():
     return _desk_post(calculate_chargeable_weight)
 
 
+MAX_PERCENT = 1000.0
+
+
+def _parse_num(value, field, *, default=None, minimum=0.0, exclusive_min=False, maximum=None):
+    """Parse a finite float within bounds; raise UserInputError with a field-level message."""
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        if default is None:
+            raise UserInputError(f"{field} is required")
+        return float(default)
+    if isinstance(value, bool):
+        raise UserInputError(f"{field} must be a number")
+    try:
+        num = float(value)
+    except OverflowError:
+        raise UserInputError(f"{field} is too large") from None
+    except (TypeError, ValueError):
+        raise UserInputError(f"{field} must be a number") from None
+    if not math.isfinite(num):
+        raise UserInputError(f"{field} must be a finite number")
+    if exclusive_min and num <= minimum:
+        raise UserInputError(f"{field} must be greater than {minimum:g}")
+    if not exclusive_min and num < minimum:
+        raise UserInputError(f"{field} must be {minimum:g} or more")
+    if maximum is not None and num > maximum:
+        raise UserInputError(f"{field} must be {maximum:g} or less")
+    return num
+
+
+def _all_finite(value) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_all_finite(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_all_finite(v) for v in value)
+    return True
+
+
+def _ensure_finite(result):
+    if not _all_finite(result):
+        raise UserInputError("Inputs are too large to calculate a result")
+    return result
+
+
 @app.route("/api/fuel-surcharge")
 def api_fuel_surcharge():
-    baseline = float(request.args.get("baseline", 3.5))
-    current_param = request.args.get("current")
-    currency = "AED"
-    if current_param is not None:
-        current = float(current_param)
-        currency = request.args.get("currency", "LOCAL")
-    else:
-        snap = _fuel_snapshot()
-        uae = snap.get("uae") or {}
-        currency = uae.get("currency", "AED")
-        grades = uae.get("grades") or []
-        diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
-        if not diesel:
-            return jsonify({"error": "Diesel price unavailable"}), 503
-        current = float(diesel["price"])
-    try:
-        return jsonify(calculate_fuel_surcharge(baseline, current, currency=currency))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+    def run():
+        baseline = _parse_num(request.args.get("baseline"), "Baseline", default=3.5, exclusive_min=True)
+        current_param = request.args.get("current")
+        if current_param is not None:
+            current = _parse_num(current_param, "Current price")
+            currency = request.args.get("currency", "LOCAL")
+        else:
+            snap = _fuel_snapshot() or {}
+            uae = snap.get("uae") or {}
+            currency = uae.get("currency", "AED")
+            grades = uae.get("grades") or []
+            diesel = next((g for g in grades if "diesel" in str(g.get("name", "")).lower()), None)
+            if not diesel:
+                raise _Abort("Diesel price unavailable", 503)
+            try:
+                current = float(diesel["price"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                current = float("nan")
+            if not math.isfinite(current) or current < 0:
+                app.logger.warning("Fuel feed returned an unusable diesel price")
+                raise _Abort("Diesel price unavailable", 503)
+        return _ensure_finite(calculate_fuel_surcharge(baseline, current, currency=currency))
+
+    return _safe_call("Fuel surcharge", run)
 
 
 @app.route("/api/receiving", methods=["POST"])
@@ -288,20 +418,47 @@ def api_fifo_fefo():
 
 @app.route("/api/landed-cost", methods=["POST"])
 def api_landed_cost():
-    body = request.get_json(silent=True) or {}
-    fx = float(body.get("fx_rate") or 0)
-    if fx <= 0:
-        data = _snapshot()
-        rates = data.get("rates") or {}
+    body, err = _json_body()
+    if err:
+        return err
+
+    def run():
+        qty = _parse_num(body.get("quantity"), "Quantity", default=1, minimum=1)
+        if qty != int(qty):
+            raise UserInputError("Quantity must be a whole number")
+        clean = {
+            "goods_value": _parse_num(body.get("goods_value"), "Goods value", exclusive_min=True),
+            "quantity": int(qty),
+            "duty_percent": _parse_num(body.get("duty_percent"), "Duty %", default=0, maximum=MAX_PERCENT),
+            "vat_percent": _parse_num(body.get("vat_percent"), "VAT %", default=0, maximum=MAX_PERCENT),
+            "clearance_fees": _parse_num(body.get("clearance_fees"), "Clearance fees", default=0),
+            "other_fees": _parse_num(body.get("other_fees"), "Other fees", default=0),
+            "to_currency": str(body.get("to_currency") or "AED").upper(),
+        }
+        fx = _parse_num(body.get("fx_rate"), "FX rate", default=0)
         from_ccy = str(body.get("from_currency") or "USD").upper()
-        to_ccy = str(body.get("to_currency") or "AED").upper()
-        if from_ccy not in rates or to_ccy not in rates:
-            return jsonify({"error": "Rates not loaded"}), 503
-        fx = rates[to_ccy]["rate"] / rates[from_ccy]["rate"]
-    try:
-        return jsonify(calculate_landed_cost(body, fx))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        if from_ccy not in CURRENCIES or clean["to_currency"] not in CURRENCIES:
+            raise UserInputError("Unsupported currency")
+        if fx <= 0:
+            data = _snapshot() or {}
+            rates = data.get("rates") or {}
+            to_ccy = clean["to_currency"]
+            if from_ccy not in rates or to_ccy not in rates:
+                raise _Abort("Rates not loaded", 503)
+            try:
+                fx = float(rates[to_ccy]["rate"]) / float(rates[from_ccy]["rate"])
+            except (KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+                fx = float("nan")
+            if not math.isfinite(fx) or fx <= 0:
+                app.logger.warning("Rate feed returned unusable data")
+                raise _Abort("Rates not loaded", 503)
+        try:
+            result = calculate_landed_cost(clean, fx)
+        except OverflowError:
+            raise UserInputError("Inputs are too large to calculate a result") from None
+        return _ensure_finite(result)
+
+    return _safe_call("Landed cost", run)
 
 
 @app.route("/api/doc-checklist", methods=["POST"])
@@ -343,12 +500,35 @@ def _is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
+def _lan_mode() -> bool:
+    return "--lan" in sys.argv[1:] or os.environ.get("LOGISTICS_LAN") == "1"
+
+
+def _lan_ip() -> str | None:
+    # UDP connect() only selects the outbound interface; no packet is sent.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
 def main() -> None:
+    lan = _lan_mode()
+    bind_host = LAN_HOST if lan else HOST
     if not _is_frozen():
         print("=" * 52)
         print("  Logistics Toolkit (FX, Fuel, Truck, Warehouse)")
         print("=" * 52)
         print(f"  Starting server at http://{HOST}:{PORT}")
+        if lan:
+            ip = _lan_ip()
+            if ip:
+                print(f"  LAN sharing ON - other devices open http://{ip}:{PORT}")
+            else:
+                print(f"  LAN sharing ON - open http://<this-PC-IP>:{PORT} on other devices")
+            print("  Home network only: there is no login. Do not port-forward.")
         print("  Close the browser tab when finished, then stop this window.")
         print("=" * 52)
 
@@ -357,7 +537,7 @@ def main() -> None:
     threading.Thread(target=_background_worker, daemon=True).start()
     threading.Thread(target=_fuel_background_worker, daemon=True).start()
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    app.run(host=bind_host, port=PORT, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

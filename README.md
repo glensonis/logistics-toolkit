@@ -31,7 +31,7 @@ Then on the other device open `http://<this-PC-IP>:5000`. When run from source, 
 
 ## Smoke tests
 
-There are two ways to test, both run from the repo root.
+There are two ways to test, both run from the repo root in an activated virtual environment (`python -m venv .venv`, then `.venv\Scripts\activate` on Windows or `source .venv/bin/activate` on Linux/macOS):
 
 **pytest** (tests in `tests/`):
 
@@ -40,13 +40,15 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
+`requirements-dev.txt` includes `requirements.txt`, so this one install covers both suites.
+
 **API smoke test** (`scripts/smoke_api.py`):
 
 ```bash
 python scripts/smoke_api.py
 ```
 
-It needs no running server. It exercises every JSON route through Flask's test client, primes the FX/fuel caches with a live network fetch first, and prints per-endpoint runtime output with a PASS/FAIL tally.
+It needs no running server. It exercises every JSON route through Flask's test client, primes the FX/fuel caches with a live network fetch first (needs internet), and prints per-endpoint runtime output with a PASS/FAIL tally.
 
 ## Build the Windows desktop app
 
